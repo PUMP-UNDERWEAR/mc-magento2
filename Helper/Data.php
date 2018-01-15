@@ -38,11 +38,15 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
     const XML_ABANDONEDCART_FIRSTDATE   = 'mailchimp/abandonedcart/firstdate';
     const XML_ABANDONEDCART_PAGE     = 'mailchimp/abandonedcart/page';
     const XML_PATH_IS_SYNC           = 'mailchimp/general/issync';
+    const XML_MERGEVARS              = 'mailchimp/general/map_fields';
+    const XML_INTEREST               = 'mailchimp/general/interest';
+    const XML_INTEREST_IN_SUCCESS    = 'mailchimp/general/interest_in_success';
+    const XML_INTEREST_SUCCESS_HTML_BEFORE  = 'mailchimp/general/interest_success_html_before';
+    const XML_INTEREST_SUCCESS_HTML_AFTER   = 'mailchimp/general/interest_success_html_after';
 
 
     const ORDER_STATE_OK             = 'complete';
 
-    const MERGE_VARS                 = [0 => ['magento' => 'fname', 'mailchimp' => 'FNAME'], 1 => ['magento' => 'lname', 'mailchimp' => 'LNAME'], 2 => ['magento' => 'gender', 'mailchimp' => 'GENDER'], 3 => ['magento' => 'dob', 'mailchimp' => 'DOB'], 4 => ['magento' => 'billing_address', 'mailchimp' => 'BILLING'], 5 => ['magento' => 'shipping_address', 'mailchimp' => 'SHIPPING'], 6 => ['magento' => 'billing_telephone', 'mailchimp' => 'BTELEPHONE'], 7 => ['magento' => 'shipping_telephone', 'mailchimp' => 'STELEPHONE'], 8 => ['magento' => 'billing_company', 'mailchimp' => 'BCOMPANY'], 9 => ['magento' => 'shipping_company', 'mailchimp' => 'SCOMPANY'], 10 => ['magento' => 'group_id', 'mailchimp' => 'CGROUP'], 11 => ['magento' => 'store_id', 'mailchimp' => 'STOREID']];
     const GUEST_GROUP                = 'NOT LOGGED IN';
     const IS_CUSTOMER   = "CUS";
     const IS_PRODUCT    = "PRO";
@@ -145,6 +149,25 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
      * @var \Magento\Framework\App\Cache\TypeListInterface
      */
     private $_cacheTypeList;
+    /**
+     * @var \Magento\Customer\Model\ResourceModel\Attribute\CollectionFactory
+     */
+    private $_attCollection;
+    /**
+     * @var \Magento\Customer\Model\CustomerFactory
+     */
+    protected $_customerFactory;
+    /**
+     * @var \Magento\Directory\Api\CountryInformationAcquirerInterface
+     */
+    protected $_countryInformation;
+    /**
+     * @var \Ebizmarts\MailChimp\Model\MailChimpInterestGroupFactory
+     */
+    protected $_interestGroupFactory;
+
+
+    private $customerAtt = null;
 
     /**
      * Data constructor.
@@ -164,11 +187,15 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
      * @param \Ebizmarts\MailChimp\Model\MailChimpSyncBatches $syncBatches
      * @param \Ebizmarts\MailChimp\Model\MailChimpStoresFactory $mailChimpStoresFactory
      * @param \Ebizmarts\MailChimp\Model\MailChimpStores $mailChimpStores
+     * @param \Magento\Customer\Model\ResourceModel\Attribute\CollectionFactory $attCollection
      * @param \Magento\Framework\Encryption\Encryptor $encryptor
      * @param \Magento\Newsletter\Model\ResourceModel\Subscriber\CollectionFactory $subscriberCollection
      * @param \Magento\Customer\Model\ResourceModel\Customer\CollectionFactory $customerCollection
      * @param \Magento\Customer\Api\AddressRepositoryInterface $addressRepositoryInterface
+     * @param \Magento\Customer\Model\CustomerFactory $customerFactory
+     * @param \Magento\Directory\Api\CountryInformationAcquirerInterface $countryInformation
      * @param \Magento\Framework\App\ResourceConnection $resource
+     * @param \Ebizmarts\MailChimp\Model\MailChimpInterestGroupFactory $interestGroupFactory
      */
     public function __construct(
         \Magento\Framework\App\Helper\Context $context,
@@ -187,11 +214,15 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         \Ebizmarts\MailChimp\Model\MailChimpSyncBatches $syncBatches,
         \Ebizmarts\MailChimp\Model\MailChimpStoresFactory $mailChimpStoresFactory,
         \Ebizmarts\MailChimp\Model\MailChimpStores $mailChimpStores,
+        \Magento\Customer\Model\ResourceModel\Attribute\CollectionFactory $attCollection,
         \Magento\Framework\Encryption\Encryptor $encryptor,
         \Magento\Newsletter\Model\ResourceModel\Subscriber\CollectionFactory $subscriberCollection,
         \Magento\Customer\Model\ResourceModel\Customer\CollectionFactory $customerCollection,
         \Magento\Customer\Api\AddressRepositoryInterface $addressRepositoryInterface,
-        \Magento\Framework\App\ResourceConnection $resource
+        \Magento\Customer\Model\CustomerFactory $customerFactory,
+        \Magento\Directory\Api\CountryInformationAcquirerInterface $countryInformation,
+        \Magento\Framework\App\ResourceConnection $resource,
+        \Ebizmarts\MailChimp\Model\MailChimpInterestGroupFactory $interestGroupFactory
     ) {
 
         $this->_storeManager  = $storeManager;
@@ -217,6 +248,10 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         $this->_resource                = $resource;
         $this->connection               = $resource->getConnection();
         $this->_cacheTypeList           = $cacheTypeList;
+        $this->_attCollection           = $attCollection;
+        $this->_customerFactory         = $customerFactory;
+        $this->_countryInformation      = $countryInformation;
+        $this->_interestGroupFactory    = $interestGroupFactory;
         parent::__construct($context);
     }
 
@@ -258,7 +293,53 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         $this->_api->setUserAgent('Mailchimp4Magento' . (string)$this->getModuleVersion());
         return $this->_api;
     }
+    private function getCustomerAtts()
+    {
+        $ret = [];
+        if(!$this->customerAtt) {
+            $collection = $this->_attCollection->create();
+            /**
+             * @var $item \Magento\Customer\Model\Attribute
+             */
+            foreach ($collection as $item) {
+                try {
+                    $options = $item->getSource()->getAllOptions();
+                }
+                catch(\Exception $e) {
+                    $options = [];
+                }
+                $isDate = ($item->getBackendModel()=='Magento\Eav\Model\Entity\Attribute\Backend\Datetime') ? 1:0;
+                $isAddress = ($item->getBackendModel()=='Magento\Customer\Model\Customer\Attribute\Backend\Billing'||
+                    $item->getBackendModel()=='Magento\Customer\Model\Customer\Attribute\Backend\Shipping') ? 1:0;
+                $ret[$item->getId()] = ['attCode' => $item->getAttributeCode(), 'isDate' =>$isDate, 'isAddress' => $isAddress, 'options'=>$options] ;
+            }
 
+            $this->customerAtt = $ret;
+        }
+        return $this->customerAtt;
+
+    }
+    public function getMapFields($storeId = null)
+    {
+        $retData = [];
+        $customerAtt = $this->getCustomerAtts();
+        $data = $this->getConfigValue(self::XML_MERGEVARS, $storeId);
+        $data = unserialize($data);
+        foreach ($data as $customerFieldId => $mailchimpName) {
+            $retData[] = [
+                'mailchimp' => strtoupper($mailchimpName) ,
+                'customer_field' => $customerAtt[$customerFieldId]['attCode'],
+                'isDate' =>$customerAtt[$customerFieldId]['isDate'],
+                'isAddress' => $customerAtt[$customerFieldId]['isAddress'],
+                'options' => $customerAtt[$customerFieldId]['options']
+            ];
+        }
+        return $retData;
+    }
+    public function getDateFormat()
+    {
+        return 'm/d/Y';
+    }
     /**
      * @param $apiKey
      * @return \Mailchimp
@@ -326,6 +407,17 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
             [
                 'id' => $couponId,
                 'token' => $token,
+                '_nosid' => true,
+                '_secure' => true
+            ]
+        );
+        return $rc;
+    }
+    public function getSuccessInterestUrl($storeId)
+    {
+        $rc = $this->_storeManager->getStore($storeId)->getUrl(
+            'mailchimp/checkout/success',
+            [
                 '_nosid' => true,
                 '_secure' => true
             ]
@@ -426,131 +518,110 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         return BP;
     }
 
-    public function getMergeVars($object, $email)
+    /**
+     * @param \Magento\Customer\Model\Customer $customer
+     * @param $storeId
+     * @param null $email
+     * @return array|null
+     */
+    public function getMergeVars(\Magento\Customer\Model\Customer $customer, $storeId)
     {
-        $merge_vars = [];
-        $mergeVars  = $this::MERGE_VARS;
+        $mergeVars = [];
+        $mapFields = $this->getMapFields($storeId);
+        foreach ($mapFields as $map) {
+            $value = $customer->getData($map['customer_field']);
+            if($value) {
+                if ($map['isDate']) {
+                    $format = $this->getDateFormat();
+                    if($map['customer_field']=='dob') {
+                        $format = substr($format,0,3);
+                    }
+                    $value = date($format, strtotime($value));
+                } elseif($map['isAddress']) {
+                    $value = $this->_getAddressValues($customer->getPrimaryAddress($map['customer_field']));
+                } elseif(count($map['options'])) {
+                    foreach($map['options'] as $option) {
+                        if($option['value']==$value) {
+                            $value = $option['label'];
+                            break;
+                        }
+                    }
+                }
+                $mergeVars[$map['mailchimp']] = $value;
+            }
+        }
+        return (!empty($mergeVars)) ? $mergeVars : null;
+    }
 
-        if (!$mergeVars) {
-            return $merge_vars;
-        }
-        $customer = null;
-        try {
-            $customer = $this->_customer->get($email);
-        } catch (\Exception $e) {
-            $this->log($e->getMessage());
-            //Customer doesn't exist. Continue with the subscriber.
-        }
-        foreach ($mergeVars as $map) {
-            if ($customer) {
-                $merge_vars = $this->_getCustomerMergeVarsValues($map, $customer, $merge_vars);
+    /**
+     * @param \Magento\Customer\Model\Address\AbstractAddress $value
+     * @return array
+     */
+    private function _getAddressValues(\Magento\Customer\Model\Address\AbstractAddress $address)
+    {
+        $addressData = array();
+        if ($address) {
+            $street = $address->getStreet();
+            if (count($street) > 1) {
+                $addressData["addr1"] = $street[0];
+                $addressData["addr2"] = $street[1];
             } else {
-                $merge_vars = $this->_getSubscriberMergeVarsValues($map, $object, $merge_vars);
+                if (!empty($street[0])) {
+                    $addressData["addr1"] = $street[0];
+                }
+            }
+            if ($address->getCity()) {
+                $addressData["city"] = $address->getCity();
+            }
+            if ($address->getRegion()) {
+                $addressData["state"] = $address->getRegion();
+            }
+            if ($address->getPostcode()) {
+                $addressData["zip"] = $address->getPostcode();
+            }
+            if ($address->getCountry()) {
+                $country = $this->_countryInformation->getCountryInfo($address->getCountryId());
+                $addressData["country"] = $country->getFullNameLocale();
             }
         }
-        return $merge_vars;
+        return $addressData;
     }
 
-    protected function _getCustomerMergeVarsValues($map, $customer, $merge_vars)
+    public function getMergeVarsBySubscriber(\Magento\Newsletter\Model\Subscriber $subscriber, $email=null)
     {
-        $customAtt = $map['magento'];
-        $chimpTag  = $map['mailchimp'];
-        if ($chimpTag && $customAtt) {
-            $key = strtoupper($chimpTag);
-            switch ($customAtt) {
-                case 'fname':
-                    $val = $customer->getFirstname();
-                    $merge_vars[$key] = $val;
-                    break;
-                case 'lname':
-                    $val = $customer->getLastname();
-                    $merge_vars[$key] = $val;
-                    break;
-                case 'gender':
-                    $val = (int)$customer->getGender();
-                    if ($val == 1) {
-                        $merge_vars[$key] = 'Male';
-                    } elseif ($val == 2) {
-                        $merge_vars[$key] = 'Female';
-                    }
-                    break;
-                case 'dob':
-                    $dob = $customer->getDob();
-                    if ($dob) {
-                        $merge_vars[$key] = (substr($dob, 5, 2) . '/' . substr($dob, 8, 2));
-                    }
-                    break;
-                case 'billing_address':
-                case 'shipping_address':
-                    $addr = explode('_', $customAtt);
-                    $merge_vars = array_merge($merge_vars, $this->_updateMergeVars($key, ucfirst($addr[0]), $customer));
-                    break;
-                case 'billing_telephone':
-                    try {
-                        $address = $this->_addressRepositoryInterface->getById($customer->getDefaultBilling());
-                        if ($address) {
-                            $telephone = $address->getTelephone();
-                            if ($telephone) {
-                                $merge_vars[$key] = $telephone;
-                            }
-                        }
-                    } catch(\Exception $e) {
-                        $this->log($e->getMessage());
-                    }
-                    break;
-                case 'billing_company':
-                    try {
-                        $address = $this->_addressRepositoryInterface->getById($customer->getDefaultBilling());
-                        if ($address) {
-                            $company = $address->getCompany();
-                            if ($company) {
-                                $merge_vars[$key] = $company;
-                            }
-                        }
-                    } catch(\Exception $e) {
-                        $this->log($e->getMessage());
-                    }
-
-                    break;
-                case 'shipping_telephone':
-                    try {
-                        $address = $this->_addressRepositoryInterface->getById($customer->getDefaultShipping());
-                        if ($address) {
-                            $telephone = $address->getTelephone();
-                            if ($telephone) {
-                                $merge_vars[$key] = $telephone;
-                            }
-                        }
-                    } catch(\Exception $e) {
-                        $this->log($e->getMessage());
-                    }
-                    break;
-                case 'shipping_company':
-                    try {
-                        $address = $this->_addressRepositoryInterface->getById($customer->getDefaultShipping());
-                        if ($address) {
-                            $company = $address->getCompany();
-                            if ($company) {
-                                $merge_vars[$key] = $company;
-                            }
-                        }
-                    } catch(\Exception $e) {
-                        $this->log($e->getMessage());
-                    }
-                    break;
-                case 'group_id':
-                    $merge_vars = array_merge($merge_vars, $this->_getCustomerGroup($customer, $key, $merge_vars));
-                    break;
-                case 'store_id':
-                    $storeId = $customer->getStoreId();
-                    if($storeId) {
-                        $merge_vars[$key] = $storeId;
-                    }
-                    break;
-            }
-            return $merge_vars;
+        $mergeVars = [];
+        $storeId = $subscriber->getStoreId();
+        $webSiteId = $this->getWebsiteId($subscriber->getStoreId());
+        if(!$email) {
+            $email = $subscriber->getEmail();
         }
+        try {
+            /**
+             * @var $customer \Magento\Customer\Model\Customer
+             */
+            $customer = $this->_customerFactory->create();
+            $customer->setWebsiteId($webSiteId);
+            $customer->loadByEmail($email);
+            if ($customer->getData('email') == $email) {
+                $mergeVars = $this->getMergeVars($customer,$storeId);
+            }
+        }catch(\Exception $e) {
+            $this->log($e->getMessage());
+        }
+        return $mergeVars;
     }
+
+    /**
+     * @param \Magento\Customer\Model\Customer $customer
+     * @param $email
+     * @return array|null
+     */
+    public function getMergeVarsByCustomer(\Magento\Customer\Model\Customer $customer, $email)
+    {
+        return $this->getMergeVars($customer,$customer->getStoreId());
+    }
+
+
     public function getGeneralList($storeId)
     {
         return $this->getConfigValue(self::XML_PATH_LIST, $storeId);
@@ -566,64 +637,6 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         return null;
     }
 
-
-    protected function _getSubscriberMergeVarsValues($map, $subscriber, $merge_vars)
-    {
-        $customAtt = $map['magento'];
-        $chimpTag  = $map['mailchimp'];
-        if ($chimpTag && $customAtt) {
-            $key = strtoupper($chimpTag);
-            switch ($customAtt) {
-                case 'group_id':
-                    $merge_vars = $this->_getCustomerGroup($subscriber, $key, $merge_vars);
-                    break;
-                case 'store_id':
-                    if($subscriber->getStoreId()) {
-                        $merge_vars[$key] = $subscriber->getStoreId();
-                    }
-                    break;
-            }
-            return $merge_vars;
-        }
-    }
-
-    protected function _getCustomerGroup($customer, $key, $merge_vars)
-    {
-        $group_id = (int) $customer->getGroupId();
-        if ($group_id == 0) {
-            $merge_vars[$key] = $this::GUEST_GROUP;
-        } else {
-            try {
-                $customerGroup = $this->_groupRegistry->retrieve($group_id);
-                $merge_vars[$key] = $customerGroup->getCode();
-            } catch (\Exception $e) {
-                throw new \Exception($e->getMessage());
-            }
-        }
-        return $merge_vars;
-    }
-
-    protected function _updateMergeVars($key, $type, $customer)
-    {
-        $merge_vars = [];
-        try {
-            $address = $this->_addressRepositoryInterface->getById($customer->{'getDefault' . $type});
-            if ($address) {
-                $merge_vars[$key] = [
-                    'addr1' => $address->getStreetLine(1),
-                    'addr2' => $address->getStreetLine(2),
-                    'city' => $address->getCity(),
-                    'state' => (!$address->getRegion() ? $address->getCity() : $address->getRegion()),
-                    'zip' => $address->getPostcode(),
-                    'country' => $address->getCountryId()
-                ];
-
-            }
-        } catch(\Exception $e) {
-            $this->log($e->getMessage());
-        }
-        return $merge_vars;
-    }
     public function getDateMicrotime()
     {
         $microtime = explode(' ', microtime());
@@ -807,8 +820,8 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
             '_nosid' => true,
             '_secure' => true]);
         try {
-            $this->log($hookUrl);
-            $ret = $api->lists->webhooks->add($listId, urlencode($hookUrl), $events, $sources);
+            // the urlencode of the hookUrl not work
+            $ret = $api->lists->webhooks->add($listId, $hookUrl, $events, $sources);
         } catch (\Mailchimp_Error $e) {
             $this->log($e->getMessage());
         }
@@ -894,5 +907,70 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
     public function getWebsiteId($storeId)
     {
         return $this->_storeManager->getStore($storeId)->getWebsiteId();
+    }
+    public function getInterest($storeId)
+    {
+        $rc = [];
+        $interest = $this->getConfigValue(self::XML_INTEREST,$storeId);
+        if($interest!='') {
+            $interest = explode(",", $interest);
+        } else {
+            $interest = [];
+        }
+        $api = $this->getApi($storeId);
+        $listId =$this->getConfigValue(self::XML_PATH_LIST,$storeId);
+        $allInterest = $api->lists->interestCategory->getAll($listId);
+        foreach($allInterest['categories'] as $item) {
+            if(in_array($item['id'],$interest)) {
+                $rc[$item['id']]['interest'] = ['id' => $item['id'], 'title' => $item['title'], 'type' => $item['type']];
+            }
+        }
+        foreach($interest as $interestId) {
+            $mailchimpInterest = $api->lists->interestCategory->interests->getAll($listId,$interestId);
+            foreach($mailchimpInterest['interests'] as $mi) {
+                $rc[$mi['category_id']]['category'][$mi['display_order']] = ['id'=>$mi['id'],'name'=>$mi['name'],'checked'=>false];
+            }
+        }
+        return $rc;
+    }
+    public function getSubscriberInterest($subscriberId, $storeId, $interest = null)
+    {
+        if(!$interest) {
+            $interest = $this->getInterest($storeId);
+        }
+        /**
+         * @var $interestGroup \Ebizmarts\MailChimp\Model\MailChimpInterestGroup
+         */
+
+        $interestGroup = $this->_interestGroupFactory->create();
+        $interestGroup->getBySubscriberIdStoreId($subscriberId,$storeId);
+        $groups = unserialize($interestGroup->getGroupdata());
+        if(isset($groups['group'])) {
+            foreach ($groups['group'] as $key => $value) {
+                if (isset($interest[$key])) {
+                    if (is_array($value)) {
+                        foreach ($value as $groupId) {
+                            foreach ($interest[$key]['category'] as $gkey => $gvalue) {
+                                if ($gvalue['id'] == $groupId) {
+                                    $interest[$key]['category'][$gkey]['checked'] = true;
+                                } elseif (!isset($interest[$key]['category'][$gkey]['checked'])) {
+                                    $interest[$key]['category'][$gkey]['checked'] = false;
+                                }
+                            }
+                        }
+                    } else {
+                        foreach ($interest[$key]['category'] as $gkey => $gvalue) {
+                            if ($gvalue['id'] == $value) {
+                                $interest[$key]['category'][$gkey]['checked'] = true;
+                            } else {
+                                $interest[$key]['category'][$gkey]['checked'] = false;
+                            }
+                        }
+
+                    }
+                }
+            }
+        }
+        return $interest;
     }
 }
